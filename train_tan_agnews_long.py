@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Train TAN/Topoformer on AG News Dataset - Multi-GPU with DistributedDataParallel
-Usage: CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 agnews_multi_gpu.py
+Usage: CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 train_tan_agnews_long.py
 
 Author: TAN Research Team
 Date: 2024
@@ -136,10 +136,11 @@ class AGNewsConfig:
 class TopoformerForClassification(nn.Module):
     """TAN/Topoformer adapted for text classification with memory optimization"""
     
-    def __init__(self, config: TopoformerConfig, num_labels: int):
+    def __init__(self, config: TopoformerConfig, num_labels: int, use_gradient_checkpointing: bool = False):
         super().__init__()
         self.config = config
         self.num_labels = num_labels
+        self.use_gradient_checkpointing = use_gradient_checkpointing
         
         # Embeddings
         self.token_embeddings = nn.Embedding(config.vocab_size, config.embed_dim)
@@ -168,12 +169,6 @@ class TopoformerForClassification(nn.Module):
         
         # Initialize weights
         self.apply(self._init_weights)
-        
-        # Enable gradient checkpointing if specified
-        if hasattr(config, 'gradient_checkpointing') and config.gradient_checkpointing:
-            self.gradient_checkpointing = True
-        else:
-            self.gradient_checkpointing = False
         
     def _init_weights(self, module):
         """Initialize model weights"""
@@ -209,7 +204,7 @@ class TopoformerForClassification(nn.Module):
         # Apply Topoformer layers with optional gradient checkpointing
         hidden_states = embeddings
         for layer in self.layers:
-            if self.gradient_checkpointing and self.training:
+            if self.use_gradient_checkpointing and self.training:
                 hidden_states = torch.utils.checkpoint.checkpoint(
                     layer,
                     hidden_states,
@@ -717,6 +712,7 @@ def main():
             logger.info("Initializing TAN Model for Classification")
             logger.info("="*60)
         
+        # Create TopoformerConfig without gradient_checkpointing parameter
         topo_config = TopoformerConfig(
             vocab_size=config.vocab_size,
             embed_dim=config.embed_dim,
@@ -725,11 +721,15 @@ def main():
             max_seq_len=config.max_seq_len,
             dropout=config.dropout,
             k_neighbors=config.k_neighbors,
-            use_topology=config.use_topology,
-            gradient_checkpointing=config.gradient_checkpointing
+            use_topology=config.use_topology
         )
         
-        model = TopoformerForClassification(topo_config, config.num_labels)
+        # Pass gradient_checkpointing as a separate parameter to the model
+        model = TopoformerForClassification(
+            topo_config, 
+            config.num_labels,
+            use_gradient_checkpointing=config.gradient_checkpointing
+        )
         
         if rank == 0:
             total_params = sum(p.numel() for p in model.parameters())
