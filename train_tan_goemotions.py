@@ -71,7 +71,7 @@ class GoEmotionsConfig:
     cache_dir: str = './cache'
     
     # Model parameters
-    vocab_size: int = 50000
+    vocab_size: int = 50268
     embed_dim: int = 768
     num_layers: int = 8
     num_heads: int = 14
