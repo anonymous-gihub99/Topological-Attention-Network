@@ -248,7 +248,7 @@ class GoEmotionsDataset(Dataset):
         self.dataset = load_dataset(
             'google-research-datasets/go_emotions',
             'simplified',
-            split=split,
+            split='train',
             cache_dir=cache_dir,
             trust_remote_code=True
         )
