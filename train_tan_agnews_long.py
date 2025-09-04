@@ -1,7 +1,6 @@
 """
-Train TAN/Topoformer on AG News Dataset - Long Context Classification with DataParallel
-Implements training for news classification with artificially extended sequences
-Uses document augmentation techniques to create longer contexts
+Train TAN/Topoformer on AG News Dataset - Original Dataset Classification with DataParallel
+Implements training for news classification using original AG News samples without artificial extension
 
 Author: TAN Research Team
 Date: 2024
@@ -56,7 +55,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('agnews_long_training.log'),
+        logging.FileHandler('agnews_training.log'),
         logging.StreamHandler()
     ]
 )
@@ -64,31 +63,30 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class AGNewsLongConfig:
-    """Configuration for AG News long-context training"""
+class AGNewsConfig:
+    """Configuration for AG News training"""
     # Data parameters
     data_dir: str = './agnews_data'
     save_dir: str = './agnews_models'
     cache_dir: str = './cache'
+    max_samples: int = 90000  # Limit to 90k samples for consistency
     
     # Model parameters
     vocab_size: int = 50268
     embed_dim: int = 768
-    num_layers: int = 8  # More layers for long context
+    num_layers: int = 8
     num_heads: int = 12
     dropout: float = 0.1
-    k_neighbors: int = 48  # More neighbors for long sequences
+    k_neighbors: int = 32  # Reduced for shorter sequences
     use_topology: bool = True
     
-    # Long context parameters
-    min_seq_len: int = 512
-    max_seq_len: int = 2048  # Start with 2K, can extend
-    context_extension_methods: List[str] = None
+    # Sequence parameters - adjusted for original AG News
+    max_seq_len: int = 512  # Standard length for AG News
     
     # Training parameters
-    batch_size: int = 8  # Smaller batch for long sequences
-    gradient_accumulation_steps: int = 4  # More accumulation
-    learning_rate: float = 1e-5
+    batch_size: int = 16  # Larger batch for shorter sequences
+    gradient_accumulation_steps: int = 2
+    learning_rate: float = 2e-5
     weight_decay: float = 0.01
     warmup_ratio: float = 0.1
     num_epochs: int = 7
@@ -99,52 +97,40 @@ class AGNewsLongConfig:
     
     # Optimization
     use_mixed_precision: bool = True
-    gradient_checkpointing: bool = True  # Important for long sequences
+    gradient_checkpointing: bool = False  # Not needed for shorter sequences
     
     # Hardware
-    num_workers: int = 4  # Less workers for larger batches
+    num_workers: int = 4
     pin_memory: bool = True
     prefetch_factor: int = 2
-    
-    def __post_init__(self):
-        if self.context_extension_methods is None:
-            self.context_extension_methods = ['paraphrase', 'context', 'retrieval', 'duplicate']
 
 
-class TopoformerForLongContext(nn.Module):
-    """TAN/Topoformer adapted for long-context classification"""
+class TopoformerForClassification(nn.Module):
+    """TAN/Topoformer adapted for text classification"""
     
     def __init__(self, config: TopoformerConfig, num_labels: int):
         super().__init__()
         self.config = config
         self.num_labels = num_labels
         
-        # Embeddings with positional encoding for long sequences
+        # Embeddings
         self.token_embeddings = nn.Embedding(config.vocab_size, config.embed_dim)
         self.position_embeddings = nn.Embedding(config.max_seq_len, config.embed_dim)
-        self.segment_embeddings = nn.Embedding(4, config.embed_dim)  # For document segments
         self.embedding_norm = nn.LayerNorm(config.embed_dim)
         self.embedding_dropout = nn.Dropout(config.dropout)
-        
-        # Hierarchical pooling
-        self.local_pool_size = 64  # Pool every 64 tokens
-        self.local_pooler = nn.Conv1d(config.embed_dim, config.embed_dim, 
-                                      kernel_size=self.local_pool_size, 
-                                      stride=self.local_pool_size)
         
         # Topoformer layers
         self.layers = nn.ModuleList([
             TopoformerLayer(config) for _ in range(config.num_layers)
         ])
         
-        # Global pooling
+        # Pooling and classification head
         self.pooler = nn.Sequential(
             nn.Linear(config.embed_dim, config.embed_dim),
             nn.Tanh(),
             nn.Dropout(config.dropout)
         )
         
-        # Classifier
         self.classifier = nn.Sequential(
             nn.Linear(config.embed_dim, config.embed_dim // 2),
             nn.ReLU(),
@@ -164,26 +150,20 @@ class TopoformerForLongContext(nn.Module):
         elif isinstance(module, nn.LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
-        elif isinstance(module, nn.Conv1d):
-            nn.init.kaiming_normal_(module.weight, mode='fan_out', nonlinearity='relu')
     
     def forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        segment_ids: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
-        use_cache: bool = False
+        labels: Optional[torch.Tensor] = None
     ) -> Dict[str, torch.Tensor]:
         """
-        Forward pass with hierarchical processing for long sequences
+        Forward pass for classification
         
         Args:
             input_ids: [batch_size, seq_len]
             attention_mask: [batch_size, seq_len]
-            segment_ids: [batch_size, seq_len] - segment indicators
             labels: [batch_size]
-            use_cache: Whether to cache intermediate states
             
         Returns:
             Dictionary with loss and/or logits
@@ -194,61 +174,22 @@ class TopoformerForLongContext(nn.Module):
         # Create position ids
         position_ids = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
         
-        # Default segment ids if not provided
-        if segment_ids is None:
-            # Create segments (0, 1, 2, 3) for quarters of the document
-            segment_ids = torch.zeros_like(input_ids)
-            segment_size = seq_len // 4
-            for i in range(4):
-                start_idx = i * segment_size
-                end_idx = (i + 1) * segment_size if i < 3 else seq_len
-                segment_ids[:, start_idx:end_idx] = i
-        
         # Embeddings
         token_embeds = self.token_embeddings(input_ids)
         position_embeds = self.position_embeddings(position_ids)
-        segment_embeds = self.segment_embeddings(segment_ids)
         
-        embeddings = token_embeds + position_embeds + segment_embeds
+        embeddings = token_embeds + position_embeds
         embeddings = self.embedding_norm(embeddings)
         embeddings = self.embedding_dropout(embeddings)
         
-        # Hierarchical processing for very long sequences
-        if seq_len > 1024:
-            # Apply local pooling first
-            embeddings_transposed = embeddings.transpose(1, 2)  # [batch, embed_dim, seq_len]
-            pooled_embeddings = self.local_pooler(embeddings_transposed)
-            pooled_embeddings = pooled_embeddings.transpose(1, 2)  # [batch, pooled_seq_len, embed_dim]
-            
-            # Adjust attention mask
-            if attention_mask is not None:
-                pooled_mask = F.max_pool1d(
-                    attention_mask.unsqueeze(1).float(),
-                    kernel_size=self.local_pool_size,
-                    stride=self.local_pool_size
-                ).squeeze(1).long()
-            else:
-                pooled_mask = None
-            
-            hidden_states = pooled_embeddings
-            mask = pooled_mask
-        else:
-            hidden_states = embeddings
-            mask = attention_mask
+        # Apply Topoformer layers
+        hidden_states = embeddings
+        for layer in self.layers:
+            hidden_states = layer(hidden_states, attention_mask)
         
-        # Apply Topoformer layers with gradient checkpointing
-        for i, layer in enumerate(self.layers):
-            if self.training and self.config.num_layers > 4 and i > 1:
-                # Use gradient checkpointing for middle layers
-                hidden_states = torch.utils.checkpoint.checkpoint(
-                    layer, hidden_states, mask
-                )
-            else:
-                hidden_states = layer(hidden_states, mask)
-        
-        # Global pooling with attention weights
-        if mask is not None:
-            mask_expanded = mask.unsqueeze(-1).float()
+        # Global pooling with attention masking
+        if attention_mask is not None:
+            mask_expanded = attention_mask.unsqueeze(-1).float()
             sum_embeddings = (hidden_states * mask_expanded).sum(1)
             sum_mask = mask_expanded.sum(1).clamp(min=1e-9)
             pooled = sum_embeddings / sum_mask
@@ -271,29 +212,28 @@ class TopoformerForLongContext(nn.Module):
         return outputs
 
 
-class AGNewsLongDataset(Dataset):
-    """Dataset class for AG News with context extension"""
+class AGNewsDataset(Dataset):
+    """Dataset class for AG News without artificial extension"""
     
     def __init__(
         self,
         split: str,
         tokenizer,
-        config: AGNewsLongConfig,
-        augment: bool = True
+        config: AGNewsConfig,
+        max_samples: Optional[int] = None
     ):
         """
-        Initialize dataset with context extension
+        Initialize dataset with original AG News data
         
         Args:
             split: 'train' or 'test'
             tokenizer: Tokenizer to use
             config: Configuration object
-            augment: Whether to augment texts to create longer contexts
+            max_samples: Maximum number of samples to use
         """
-        self.split = 'train'
+        self.split = split
         self.tokenizer = tokenizer
         self.config = config
-        self.augment = augment and (split == 'train')
         
         # Load dataset
         logger.info(f"Loading AG News {split} dataset...")
@@ -304,132 +244,30 @@ class AGNewsLongDataset(Dataset):
             trust_remote_code=True
         )
         
-        # Class labels
+        # Limit samples if specified
+        if max_samples is not None and len(self.dataset) > max_samples:
+            # Use a deterministic subset for reproducibility
+            indices = list(range(0, len(self.dataset), len(self.dataset) // max_samples))[:max_samples]
+            self.dataset = self.dataset.select(indices)
+            logger.info(f"Limited to {len(self.dataset)} samples")
+        
+        # Class labels mapping
         self.label_names = ['World', 'Sports', 'Business', 'Sci/Tech']
         
-        logger.info(f"Loaded {len(self.dataset)} samples")
+        logger.info(f"Loaded {len(self.dataset)} {split} samples")
         
     def __len__(self) -> int:
         return len(self.dataset)
     
-    def _extend_context(self, text: str, label: int) -> str:
-        """
-        Extend text context using various augmentation techniques
-        
-        Args:
-            text: Original text
-            label: Text label for context-aware extension
-            
-        Returns:
-            Extended text
-        """
-        extended_texts = [text]
-        current_length = len(self.tokenizer.tokenize(text))
-        target_length = random.randint(self.config.min_seq_len, self.config.max_seq_len)
-        
-        methods = self.config.context_extension_methods.copy()
-        random.shuffle(methods)
-        
-        for method in methods:
-            if current_length >= target_length:
-                break
-                
-            if method == 'paraphrase':
-                # Add paraphrased version
-                paraphrase = self._paraphrase(text)
-                extended_texts.append(paraphrase)
-                
-            elif method == 'context':
-                # Add contextual information based on label
-                context = self._get_label_context(label)
-                extended_texts.append(context)
-                
-            elif method == 'retrieval':
-                # Retrieve and add similar samples from the same class
-                similar_text = self._get_similar_sample(label)
-                if similar_text:
-                    extended_texts.append(similar_text)
-                    
-            elif method == 'duplicate':
-                # Duplicate with slight modifications
-                modified = self._slight_modification(text)
-                extended_texts.append(modified)
-            
-            # Update current length
-            current_text = " [SEP] ".join(extended_texts)
-            current_length = len(self.tokenizer.tokenize(current_text))
-        
-        return " [SEP] ".join(extended_texts)
-    
-    def _paraphrase(self, text: str) -> str:
-        """Simple paraphrasing by word replacement"""
-        words = text.split()
-        num_changes = max(1, len(words) // 10)
-        
-        for _ in range(num_changes):
-            if len(words) > 0:
-                idx = random.randint(0, len(words) - 1)
-                # Simple synonym replacement (in practice, use a proper paraphraser)
-                synonyms = {
-                    'good': 'excellent', 'bad': 'poor', 'big': 'large',
-                    'small': 'tiny', 'fast': 'quick', 'slow': 'sluggish'
-                }
-                word = words[idx].lower()
-                if word in synonyms:
-                    words[idx] = synonyms[word]
-        
-        return ' '.join(words)
-    
-    def _get_label_context(self, label: int) -> str:
-        """Get contextual information for each label"""
-        contexts = {
-            0: "This article discusses world events, international relations, global politics, "
-               "and matters affecting multiple countries and regions worldwide.",
-            1: "This content covers sports events, athletic competitions, team performances, "
-               "player statistics, and sporting achievements across various disciplines.",
-            2: "This piece examines business developments, economic trends, corporate news, "
-               "financial markets, and commercial activities in various industries.",
-            3: "This text explores scientific discoveries, technological innovations, "
-               "research breakthroughs, and advances in computing and engineering."
-        }
-        return contexts.get(label, "This is a news article covering recent events and developments.")
-    
-    def _get_similar_sample(self, label: int) -> Optional[str]:
-        """Get a similar sample from the same class"""
-        # Find samples with the same label
-        same_label_indices = [
-            i for i in range(len(self.dataset)) 
-            if self.dataset[i]['label'] == label and i != self.current_idx
-        ]
-        
-        if same_label_indices:
-            idx = random.choice(same_label_indices)
-            return self.dataset[idx]['text']
-        return None
-    
-    def _slight_modification(self, text: str) -> str:
-        """Slightly modify text (e.g., change tense, add connectors)"""
-        connectors = [
-            "Furthermore,", "Additionally,", "Moreover,", "In addition,",
-            "As a result,", "Consequently,", "Therefore,", "Thus,"
-        ]
-        connector = random.choice(connectors)
-        return f"{connector} {text}"
-    
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """Get a single sample with extended context"""
-        self.current_idx = idx  # For similar sample retrieval
+        """Get a single sample"""
         item = self.dataset[idx]
         
         # Get text and label
-        text = item['text']
+        text = item['text'].strip()
         label = item['label']
         
-        # Extend context if augmenting
-        if self.augment:
-            text = self._extend_context(text, label)
-        
-        # Tokenize
+        # Tokenize with proper truncation and padding
         encoding = self.tokenizer(
             text,
             truncation=True,
@@ -438,35 +276,21 @@ class AGNewsLongDataset(Dataset):
             return_tensors='pt'
         )
         
-        # Create segment ids based on [SEP] tokens
-        input_ids = encoding['input_ids'].squeeze(0)
-        sep_token_id = self.tokenizer.sep_token_id
-        segment_ids = torch.zeros_like(input_ids)
-        
-        if sep_token_id:
-            sep_positions = (input_ids == sep_token_id).nonzero(as_tuple=True)[0]
-            for i, pos in enumerate(sep_positions[:3]):  # Max 4 segments
-                if i < len(sep_positions) - 1:
-                    segment_ids[pos:sep_positions[i+1]] = i + 1
-                else:
-                    segment_ids[pos:] = i + 1
-        
         return {
-            'input_ids': input_ids,
+            'input_ids': encoding['input_ids'].squeeze(0),
             'attention_mask': encoding['attention_mask'].squeeze(0),
-            'segment_ids': segment_ids,
             'labels': torch.tensor(label, dtype=torch.long),
-            'original_text': item['text']  # Keep original for analysis
+            'text': text  # Keep original text for analysis
         }
 
 
-class LongContextTrainer:
-    """Trainer for long-context classification with DataParallel support"""
+class Trainer:
+    """Trainer for text classification with DataParallel support"""
     
     def __init__(
         self,
         model: nn.Module,
-        config: AGNewsLongConfig,
+        config: AGNewsConfig,
         device: torch.device,
         use_data_parallel: bool = True,
         gpu_ids: Optional[List[int]] = None
@@ -485,7 +309,7 @@ class LongContextTrainer:
             self.model = model.to(device)
             logger.info(f"Using single device: {device}")
         
-        # Optimizer with different learning rates for different components
+        # Optimizer with weight decay
         no_decay = ['bias', 'LayerNorm.weight', 'norm']
         optimizer_grouped_parameters = [
             {
@@ -516,7 +340,7 @@ class LongContextTrainer:
         epoch: int,
         scheduler=None
     ) -> Dict[str, float]:
-        """Train for one epoch with gradient accumulation"""
+        """Train for one epoch"""
         self.model.train()
         
         total_loss = 0
@@ -530,7 +354,6 @@ class LongContextTrainer:
             # Move batch to device
             input_ids = batch['input_ids'].to(self.device)
             attention_mask = batch['attention_mask'].to(self.device)
-            segment_ids = batch['segment_ids'].to(self.device)
             labels = batch['labels'].to(self.device)
             
             # Mixed precision training
@@ -539,7 +362,6 @@ class LongContextTrainer:
                     outputs = self.model(
                         input_ids=input_ids,
                         attention_mask=attention_mask,
-                        segment_ids=segment_ids,
                         labels=labels
                     )
                     loss = outputs['loss']
@@ -557,7 +379,6 @@ class LongContextTrainer:
                 outputs = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    segment_ids=segment_ids,
                     labels=labels
                 )
                 loss = outputs['loss']
@@ -634,13 +455,11 @@ class LongContextTrainer:
             for batch in tqdm(val_loader, desc=f"Epoch {epoch} - Validation"):
                 input_ids = batch['input_ids'].to(self.device)
                 attention_mask = batch['attention_mask'].to(self.device)
-                segment_ids = batch['segment_ids'].to(self.device)
                 labels = batch['labels'].to(self.device)
                 
                 outputs = self.model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    segment_ids=segment_ids,
                     labels=labels
                 )
                 
@@ -803,140 +622,106 @@ class LongContextTrainer:
         ax.legend()
         ax.grid(True, alpha=0.3)
         
-        plt.suptitle('AG News Long-Context Training Curves', fontsize=16)
+        plt.suptitle('AG News Training Curves', fontsize=16)
         plt.tight_layout()
         plt.savefig(save_dir / 'training_curves.png', dpi=300, bbox_inches='tight')
         plt.close()
 
 
-def test_model_at_different_lengths(
+def test_model(
     model: nn.Module,
-    test_dataset: AGNewsLongDataset,
-    config: AGNewsLongConfig,
+    test_dataset: AGNewsDataset,
     device: torch.device,
     save_dir: Path,
-    test_lengths: List[int] = None
+    batch_size: int = 32
 ) -> Dict[str, Any]:
-    """Test model performance at different sequence lengths"""
+    """Test model on test dataset"""
     
-    if test_lengths is None:
-        test_lengths = [512, 1024, 2048, 4096]
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2
+    )
     
-    results_by_length = {}
+    model.eval()
+    all_preds = []
+    all_labels = []
     
-    for max_len in test_lengths:
-        logger.info(f"\nTesting at max length: {max_len}")
-        
-        # Update config for this length
-        test_config = AGNewsLongConfig()
-        test_config.max_seq_len = max_len
-        test_config.min_seq_len = min(256, max_len // 2)
-        
-        # Create dataset with specific length
-        length_dataset = AGNewsLongDataset(
-            split='test',
-            tokenizer=test_dataset.tokenizer,
-            config=test_config,
-            augment=True  # Augment test data to reach target length
-        )
-        
-        # Create dataloader
-        test_loader = DataLoader(
-            length_dataset,
-            batch_size=max(1, 8192 // max_len),  # Adjust batch size based on length
-            shuffle=False,
-            num_workers=2
-        )
-        
-        # Test model
-        model.eval()
-        all_preds = []
-        all_labels = []
-        total_time = 0
-        
-        with torch.no_grad():
-            for batch in tqdm(test_loader, desc=f"Testing at {max_len} tokens"):
-                start_time = time.time()
-                
-                input_ids = batch['input_ids'].to(device)
-                attention_mask = batch['attention_mask'].to(device)
-                segment_ids = batch['segment_ids'].to(device)
-                labels = batch['labels'].to(device)
-                
-                outputs = model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    segment_ids=segment_ids
-                )
-                
-                total_time += time.time() - start_time
-                
-                preds = torch.argmax(outputs['logits'], dim=-1)
-                all_preds.extend(preds.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
-        
-        # Calculate metrics
-        accuracy = accuracy_score(all_labels, all_preds)
-        precision, recall, f1_macro, _ = precision_recall_fscore_support(
-            all_labels, all_preds, average='macro', zero_division=0
-        )
-        
-        # Store results
-        results_by_length[max_len] = {
-            'accuracy': accuracy,
-            'precision': precision,
-            'recall': recall,
-            'f1_macro': f1_macro,
-            'time_per_sample': total_time / len(all_labels),
-            'num_samples': len(all_labels)
-        }
-        
-        logger.info(f"Length {max_len} - Accuracy: {accuracy:.4f}, F1: {f1_macro:.4f}")
+    logger.info("Running final test evaluation...")
     
-    # Create performance vs length plot
-    lengths = list(results_by_length.keys())
-    accuracies = [results_by_length[l]['accuracy'] for l in lengths]
-    f1_scores = [results_by_length[l]['f1_macro'] for l in lengths]
-    times = [results_by_length[l]['time_per_sample'] for l in lengths]
+    with torch.no_grad():
+        for batch in tqdm(test_loader, desc="Testing"):
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            labels = batch['labels'].to(device)
+            
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask
+            )
+            
+            preds = torch.argmax(outputs['logits'], dim=-1)
+            all_preds.extend(preds.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
     
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    # Calculate comprehensive metrics
+    accuracy = accuracy_score(all_labels, all_preds)
+    precision, recall, f1_macro, _ = precision_recall_fscore_support(
+        all_labels, all_preds, average='macro', zero_division=0
+    )
+    f1_micro = f1_score(all_labels, all_preds, average='micro')
     
-    # Accuracy vs Length
-    ax = axes[0]
-    ax.plot(lengths, accuracies, 'b-o', linewidth=2, markersize=8)
-    ax.set_xlabel('Sequence Length')
-    ax.set_ylabel('Accuracy')
-    ax.set_title('Accuracy vs Sequence Length')
-    ax.grid(True, alpha=0.3)
+    # Confusion matrix
+    cm = confusion_matrix(all_labels, all_preds)
     
-    # F1 vs Length
-    ax = axes[1]
-    ax.plot(lengths, f1_scores, 'g-s', linewidth=2, markersize=8)
-    ax.set_xlabel('Sequence Length')
-    ax.set_ylabel('F1-Macro')
-    ax.set_title('F1-Macro vs Sequence Length')
-    ax.grid(True, alpha=0.3)
+    # Classification report
+    class_report = classification_report(
+        all_labels, all_preds,
+        target_names=test_dataset.label_names,
+        output_dict=True
+    )
     
-    # Time vs Length
-    ax = axes[2]
-    ax.plot(lengths, times, 'r-^', linewidth=2, markersize=8)
-    ax.set_xlabel('Sequence Length')
-    ax.set_ylabel('Time per Sample (s)')
-    ax.set_title('Inference Time vs Sequence Length')
-    ax.grid(True, alpha=0.3)
-    
-    plt.suptitle('Performance Analysis at Different Sequence Lengths', fontsize=14)
+    # Plot confusion matrix
+    plt.figure(figsize=(8, 6))
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt='d',
+        cmap='Blues',
+        xticklabels=test_dataset.label_names,
+        yticklabels=test_dataset.label_names
+    )
+    plt.title('Confusion Matrix')
+    plt.ylabel('True Label')
+    plt.xlabel('Predicted Label')
     plt.tight_layout()
-    plt.savefig(save_dir / 'length_analysis.png', dpi=300, bbox_inches='tight')
+    plt.savefig(save_dir / 'confusion_matrix.png', dpi=300, bbox_inches='tight')
     plt.close()
     
-    return results_by_length
+    # Results
+    results = {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1_macro': f1_macro,
+        'f1_micro': f1_micro,
+        'confusion_matrix': cm.tolist(),
+        'classification_report': class_report
+    }
+    
+    logger.info(f"Test Results:")
+    logger.info(f"Accuracy: {accuracy:.4f}")
+    logger.info(f"F1-Macro: {f1_macro:.4f}")
+    logger.info(f"F1-Micro: {f1_micro:.4f}")
+    
+    return results
 
 
 def main():
     """Main training script"""
     # Configuration
-    config = AGNewsLongConfig()
+    config = AGNewsConfig()
     
     # Setup device and GPUs
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -950,6 +735,8 @@ def main():
     
     # Initialize tokenizer
     tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     config.vocab_size = tokenizer.vocab_size
     
     # Create datasets
@@ -957,18 +744,25 @@ def main():
     logger.info("Loading AG News Dataset")
     logger.info("="*60)
     
-    # Split training data for validation
-    full_train_dataset = AGNewsLongDataset('train', tokenizer, config, augment=True)
+    # Load train dataset with sample limit
+    full_train_dataset = AGNewsDataset('train', tokenizer, config, max_samples=config.max_samples)
     
-    # Create train/val split (70/30)
+    # Create train/val split (90/10)
     train_size = int(0.9 * len(full_train_dataset))
     val_size = len(full_train_dataset) - train_size
     
     train_dataset, val_dataset = torch.utils.data.random_split(
-        full_train_dataset, [train_size, val_size]
+        full_train_dataset, 
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)  # For reproducibility
     )
     
-    test_dataset = AGNewsLongDataset('test', tokenizer, config, augment=False)
+    # Load test dataset (original full test set)
+    test_dataset = AGNewsDataset('test', tokenizer, config)
+    
+    logger.info(f"Train samples: {len(train_dataset)}")
+    logger.info(f"Val samples: {len(val_dataset)}")
+    logger.info(f"Test samples: {len(test_dataset)}")
     
     # Create dataloaders
     train_loader = DataLoader(
@@ -990,7 +784,7 @@ def main():
     
     # Create model
     logger.info("\n" + "="*60)
-    logger.info("Initializing TAN Model for Long Context")
+    logger.info("Initializing TAN Model for Classification")
     logger.info("="*60)
     
     topo_config = TopoformerConfig(
@@ -1004,11 +798,7 @@ def main():
         use_topology=config.use_topology
     )
     
-    model = TopoformerForLongContext(topo_config, config.num_labels)
-    
-    # Enable gradient checkpointing if specified
-    if config.gradient_checkpointing:
-        model.config.num_layers = config.num_layers  # Ensure config is set
+    model = TopoformerForClassification(topo_config, config.num_labels)
     
     # Log model information
     total_params = sum(p.numel() for p in model.parameters())
@@ -1017,7 +807,7 @@ def main():
     logger.info(f"Trainable parameters: {trainable_params:,}")
     
     # Initialize trainer
-    trainer = LongContextTrainer(
+    trainer = Trainer(
         model=model,
         config=config,
         device=device,
@@ -1037,32 +827,38 @@ def main():
         save_dir=config.save_dir
     )
     
-    # Test model at different lengths
+    # Test model
     logger.info("\n" + "="*60)
-    logger.info("Testing at Different Sequence Lengths")
+    logger.info("Testing Best Model")
     logger.info("="*60)
     
     # Load best model
     best_model_path = Path(config.save_dir) / 'best_model.pt'
-    checkpoint = torch.load(best_model_path, map_location=device)
-    
-    model = TopoformerForLongContext(topo_config, config.num_labels)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    model = model.to(device)
-    
-    # Test at different lengths
-    length_results = test_model_at_different_lengths(
-        model=model,
-        test_dataset=test_dataset,
-        config=config,
-        device=device,
-        save_dir=Path(config.save_dir),
-        test_lengths=[512, 1024, 2048]  # Test at these lengths
-    )
-    
-    # Save results
-    with open(Path(config.save_dir) / 'length_test_results.json', 'w') as f:
-        json.dump(length_results, f, indent=2)
+    if best_model_path.exists():
+        checkpoint = torch.load(best_model_path, map_location=device)
+        
+        # Create fresh model for testing
+        test_model = TopoformerForClassification(topo_config, config.num_labels)
+        test_model.load_state_dict(checkpoint['model_state_dict'])
+        test_model = test_model.to(device)
+        
+        # Run test evaluation
+        test_results = test_model(
+            model=test_model,
+            test_dataset=test_dataset,
+            device=device,
+            save_dir=Path(config.save_dir),
+            batch_size=config.batch_size * 2
+        )
+        
+        # Save test results
+        with open(Path(config.save_dir) / 'test_results.json', 'w') as f:
+            json.dump(test_results, f, indent=2, default=str)
+        
+        logger.info(f"Best validation accuracy: {checkpoint['metrics']['accuracy']:.4f}")
+        logger.info(f"Test accuracy: {test_results['accuracy']:.4f}")
+    else:
+        logger.warning("Best model not found, skipping test evaluation")
     
     logger.info("\n" + "="*60)
     logger.info("Training and Testing Complete!")
