@@ -72,7 +72,7 @@ class AGNewsLongConfig:
     cache_dir: str = './cache'
     
     # Model parameters
-    vocab_size: int = 50000
+    vocab_size: int = 50268
     embed_dim: int = 768
     num_layers: int = 8  # More layers for long context
     num_heads: int = 12
@@ -87,11 +87,11 @@ class AGNewsLongConfig:
     
     # Training parameters
     batch_size: int = 8  # Smaller batch for long sequences
-    gradient_accumulation_steps: int = 8  # More accumulation
+    gradient_accumulation_steps: int = 4  # More accumulation
     learning_rate: float = 1e-5
     weight_decay: float = 0.01
     warmup_ratio: float = 0.1
-    num_epochs: int = 10
+    num_epochs: int = 7
     max_grad_norm: float = 1.0
     
     # Classification
@@ -290,7 +290,7 @@ class AGNewsLongDataset(Dataset):
             config: Configuration object
             augment: Whether to augment texts to create longer contexts
         """
-        self.split = split
+        self.split = 'train'
         self.tokenizer = tokenizer
         self.config = config
         self.augment = augment and (split == 'train')
@@ -960,7 +960,7 @@ def main():
     # Split training data for validation
     full_train_dataset = AGNewsLongDataset('train', tokenizer, config, augment=True)
     
-    # Create train/val split (90/10)
+    # Create train/val split (70/30)
     train_size = int(0.9 * len(full_train_dataset))
     val_size = len(full_train_dataset) - train_size
     
