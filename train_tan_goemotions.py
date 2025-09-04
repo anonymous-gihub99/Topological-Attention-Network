@@ -91,7 +91,7 @@ class GoEmotionsConfig:
     
     # Multi-label specific - UPDATED
     num_labels: int = 2
-    threshold: float = 0.48  # Lower threshold for imbalanced data
+    threshold: float = 0.55  # Lower threshold for imbalanced data
     use_class_weights: bool = True
     use_focal_loss: bool = True  # Better for imbalanced multi-label
     use_asymmetric_loss: bool = False  # Alternative to focal loss
