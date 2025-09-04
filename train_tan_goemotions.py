@@ -74,7 +74,7 @@ class GoEmotionsConfig:
     vocab_size: int = 50268
     embed_dim: int = 768
     num_layers: int = 8
-    num_heads: int = 14
+    num_heads: int = 12
     max_seq_len: int = 128  # GoEmotions has short texts
     dropout: float = 0.1
     k_neighbors: int = 64
@@ -86,7 +86,7 @@ class GoEmotionsConfig:
     learning_rate: float = 3e-5
     weight_decay: float = 0.01
     warmup_ratio: float = 0.1
-    num_epochs: int = 15
+    num_epochs: int = 8
     max_grad_norm: float = 1.0
     
     # Multi-label specific
