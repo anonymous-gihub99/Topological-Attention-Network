@@ -73,7 +73,7 @@ class GoEmotionsConfig:
     # Model parameters
     vocab_size: int = 50000
     embed_dim: int = 768
-    num_layers: int = 6
+    num_layers: int = 8
     num_heads: int = 12
     max_seq_len: int = 128  # GoEmotions has short texts
     dropout: float = 0.1
@@ -86,12 +86,12 @@ class GoEmotionsConfig:
     learning_rate: float = 1e-5  # Lower learning rate
     weight_decay: float = 0.01
     warmup_ratio: float = 0.2  # More warmup
-    num_epochs: int = 20  # More epochs for better convergence
+    num_epochs: int = 5  # More epochs for better convergence
     max_grad_norm: float = 1.0
     
     # Multi-label specific - UPDATED
-    num_labels: int = 27
-    threshold: float = 0.3  # Lower threshold for imbalanced data
+    num_labels: int = 2
+    threshold: float = 0.48  # Lower threshold for imbalanced data
     use_class_weights: bool = True
     use_focal_loss: bool = True  # Better for imbalanced multi-label
     use_asymmetric_loss: bool = False  # Alternative to focal loss
@@ -348,7 +348,7 @@ class GoEmotionsDataset(Dataset):
         self.dataset = load_dataset(
             'google-research-datasets/go_emotions',
             'simplified',
-            split=split,
+            split='train',
             cache_dir=cache_dir,
             trust_remote_code=True
         )
