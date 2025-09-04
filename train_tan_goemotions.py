@@ -73,17 +73,17 @@ class GoEmotionsConfig:
     # Model parameters
     vocab_size: int = 50000
     embed_dim: int = 768
-    num_layers: int = 6
-    num_heads: int = 12
+    num_layers: int = 8
+    num_heads: int = 14
     max_seq_len: int = 128  # GoEmotions has short texts
     dropout: float = 0.1
-    k_neighbors: int = 32
+    k_neighbors: int = 64
     use_topology: bool = True
     
     # Training parameters
     batch_size: int = 64  # Larger batch for short texts
     gradient_accumulation_steps: int = 2
-    learning_rate: float = 2e-5
+    learning_rate: float = 3e-5
     weight_decay: float = 0.01
     warmup_ratio: float = 0.1
     num_epochs: int = 15
