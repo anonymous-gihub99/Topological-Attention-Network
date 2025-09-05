@@ -112,7 +112,7 @@ class AGNewsConfig:
     data_dir: str = './agnews_data'
     save_dir: str = './agnews_models_dataparallel'
     cache_dir: str = './cache'
-    max_samples: int = 50000  # Limit to 90k samples for consistency
+    max_samples: int = 40000  # Limit to 90k samples for consistency
     
     # Model parameters - Optimized for 2 GPUs
     vocab_size: int = 50268
