@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+import sys
+sys.path.append('/kaggle/working/Topological-Attention-Network')
+
+
 """
 Train TAN/Topoformer on AG News Dataset - DataParallel with 2 GPUs
 Optimized for memory efficiency and proper GPU utilization
@@ -83,11 +87,15 @@ def get_memory_stats():
             stats[f'gpu{i}_reserved_gb'] = reserved
         
         # Using GPUtil for more detailed stats
-        gpus = GPUtil.getGPUs()
-        for i, gpu in enumerate(gpus):
-            stats[f'gpu{i}_used_mb'] = gpu.memoryUsed
-            stats[f'gpu{i}_total_mb'] = gpu.memoryTotal
-            stats[f'gpu{i}_util_percent'] = gpu.memoryUtil * 100
+        try:
+            gpus = GPUtil.getGPUs()
+            for i, gpu in enumerate(gpus):
+                stats[f'gpu{i}_used_mb'] = gpu.memoryUsed
+                stats[f'gpu{i}_total_mb'] = gpu.memoryTotal
+                stats[f'gpu{i}_util_percent'] = gpu.memoryUtil * 100
+        except:
+            # GPUtil might fail in some environments
+            pass
     
     return stats
 
@@ -112,7 +120,7 @@ class AGNewsConfig:
     data_dir: str = './agnews_data'
     save_dir: str = './agnews_models_dataparallel'
     cache_dir: str = './cache'
-    max_samples: int = 40000  # Limit to 90k samples for consistency
+    max_samples: int = 40000  # Limit to 40k samples for consistency
     
     # Model parameters - Optimized for 2 GPUs
     vocab_size: int = 50268
@@ -479,11 +487,14 @@ class DataParallelTrainer:
                 total_samples += labels.size(0)
             
             # Update progress bar
+            gpu_mem_info = f'{torch.cuda.memory_allocated(0)/1e9:.1f}GB'
+            if len(self.gpu_ids) > 1:
+                gpu_mem_info += f', GPU1: {torch.cuda.memory_allocated(1)/1e9:.1f}GB'
+            
             progress_bar.set_postfix({
                 'loss': f'{loss.item() * self.config.gradient_accumulation_steps:.4f}',
                 'acc': f'{total_correct / total_samples:.4f}',
-                'gpu0_mem': f'{torch.cuda.memory_allocated(0)/1e9:.1f}GB',
-                'gpu1_mem': f'{torch.cuda.memory_allocated(1)/1e9:.1f}GB' if len(self.gpu_ids) > 1 else 'N/A'
+                'gpu_mem': gpu_mem_info
             })
             
             # Memory management
@@ -963,7 +974,8 @@ def main():
     # Load best model
     best_model_path = Path(config.save_dir) / 'best_model.pt'
     if best_model_path.exists():
-        checkpoint = torch.load(best_model_path, map_location=device)
+        # Fixed: Add weights_only=False to allow loading of numpy objects
+        checkpoint = torch.load(best_model_path, map_location=device, weights_only=False)
         model = TopoformerForClassification(
             topo_config,
             config.num_labels,
