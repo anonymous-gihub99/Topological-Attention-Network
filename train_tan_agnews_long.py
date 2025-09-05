@@ -118,7 +118,7 @@ class AGNewsConfig:
     vocab_size: int = 50268
     embed_dim: int = 512  # Reduced for memory efficiency
     num_layers: int = 6
-    num_heads: int = 12
+    num_heads: int = 8
     dropout: float = 0.1
     k_neighbors: int = 64
     use_topology: bool = True
