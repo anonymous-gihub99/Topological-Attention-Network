@@ -112,15 +112,15 @@ class AGNewsConfig:
     data_dir: str = './agnews_data'
     save_dir: str = './agnews_models_dataparallel'
     cache_dir: str = './cache'
-    max_samples: int = 90000  # Limit to 90k samples for consistency
+    max_samples: int = 50000  # Limit to 90k samples for consistency
     
     # Model parameters - Optimized for 2 GPUs
     vocab_size: int = 50268
     embed_dim: int = 512  # Reduced for memory efficiency
     num_layers: int = 6
-    num_heads: int = 8
+    num_heads: int = 12
     dropout: float = 0.1
-    k_neighbors: int = 32
+    k_neighbors: int = 64
     use_topology: bool = True
     
     # Sequence parameters
@@ -133,7 +133,7 @@ class AGNewsConfig:
     learning_rate: float = 2e-5
     weight_decay: float = 0.01
     warmup_ratio: float = 0.1
-    num_epochs: int = 10
+    num_epochs: int = 7
     max_grad_norm: float = 1.0
     
     # Classification
