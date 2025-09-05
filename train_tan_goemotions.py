@@ -86,12 +86,12 @@ class GoEmotionsConfig:
     learning_rate: float = 2e-5  # Lower learning rate
     weight_decay: float = 0.01
     warmup_ratio: float = 0.2  # More warmup
-    num_epochs: int = 8  # More epochs for better convergence
+    num_epochs: int = 10  # More epochs for better convergence
     max_grad_norm: float = 1.0
     
     # Multi-label specific - UPDATED
     num_labels: int = 2
-    threshold: float = 0.48  # Lower threshold for imbalanced data
+    threshold: float = 0.49  # Lower threshold for imbalanced data
     use_class_weights: bool = True
     use_focal_loss: bool = True  # Better for imbalanced multi-label
     use_asymmetric_loss: bool = False  # Alternative to focal loss
