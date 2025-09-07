@@ -83,10 +83,10 @@ class GoEmotionsConfig:
     # Training parameters - UPDATED
     batch_size: int = 64
     gradient_accumulation_steps: int = 2
-    learning_rate: float = 2e-5  # Lower learning rate
+    learning_rate: float = 2e-4  # Lower learning rate
     weight_decay: float = 0.01
     warmup_ratio: float = 0.2  # More warmup
-    num_epochs: int = 15  # More epochs for better convergence
+    num_epochs: int = 5  # More epochs for better convergence
     max_grad_norm: float = 1.0
     
     # Multi-label specific - UPDATED
